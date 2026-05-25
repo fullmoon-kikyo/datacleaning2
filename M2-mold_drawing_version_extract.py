@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import sys
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -20,9 +20,14 @@ INPUT_FILE_GLOB = "1510-*20260422.xlsx"
 INPUT_SHEET_NAME = "分析结果"
 CHILD_COLUMN = "子件号"
 
-BASE_NEW_COLUMNS = ["成套模具号", "初始模具号"]
+PACKAGE_MOLD_COLUMN = "成套模具号"
+INITIAL_MOLD_COLUMN = "初始模具号"
+COLOR_GROUP_COLUMN = "分组色号"
+
+BASE_NEW_COLUMNS = [PACKAGE_MOLD_COLUMN, INITIAL_MOLD_COLUMN]
 VERSION_SUMMARY_COLUMNS = ["变更履历", "当前版本", "版本数量"]
 DEFAULT_VERSION_COLUMNS = ["0版"] + [f"{letter}版" for letter in "ABCDEF"]
+
 GROUP_FILL_COLORS = [
     "B7DEE8",
     "C6E0B4",
@@ -33,16 +38,9 @@ GROUP_FILL_COLORS = [
     "A9C4E8",
     "F8CBAD",
 ]
-SUBGROUP_FILL_COLORS = [
-    "00B0F0",
-    "92D050",
-    "FFC000",
-    "FF99CC",
-    "B4A7D6",
-    "66CDAA",
-]
-SUBGROUP_KEY_COLUMN = "成套模具号"
-SUBGROUP_COLUMNS = ["成套模具号", "是否无用物料", "是否冻结物料", "不维护过程组件"]
+
+SUBGROUP_KEY_COLUMN = PACKAGE_MOLD_COLUMN
+SUBGROUP_COLUMNS = [PACKAGE_MOLD_COLUMN, "是否无用物料", "是否冻结物料", "不维护过程组件"]
 BORDER_COLOR = "305496"
 
 
@@ -61,10 +59,6 @@ def clean_text(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def find_input_file() -> Path:
-    return resolve_input_file(INPUT_FILE_NAME)
 
 
 def resolve_input_file(input_name: str) -> Path:
@@ -88,45 +82,82 @@ def resolve_input_file(input_name: str) -> Path:
     raise FileNotFoundError(f"未找到输入文件: {input_name}")
 
 
-def build_output_path(input_path: Path) -> Path:
+def build_output_path(input_path: Path, output_name: str | None = None) -> Path:
+    if output_name:
+        return Path(output_name)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return input_path.with_name(f"{input_path.stem}【处理后】{timestamp}{input_path.suffix}")
 
 
 def split_child_no(value: object) -> tuple[str, str, str]:
-    AA = ""
-    BB = ""
-    CC = ""
+    package_mold_no = ""
+    initial_mold_no = ""
+    version = ""
 
     text = clean_text(value)
     if not text:
-        return AA, BB, CC
+        return package_mold_no, initial_mold_no, version
 
     if "/" in text:
-        AA = text.split("/", 1)[0].strip()
+        package_mold_no = text.split("/", 1)[0].strip()
     else:
-        AA = text
+        package_mold_no = text
 
-    if AA and AA[-1].isalpha():
-        BB = AA[:-1]
-        CC = AA[-1].upper()
+    if package_mold_no and package_mold_no[-1].isalpha():
+        initial_mold_no = package_mold_no[:-1]
+        version = package_mold_no[-1].upper()
     else:
-        BB = AA
-        CC = "0"
+        initial_mold_no = package_mold_no
+        version = "0"
 
-    return AA, BB, CC
+    return package_mold_no, initial_mold_no, version
+
+
+def assign_group_color_ids(df: pd.DataFrame) -> None:
+    color_by_initial: dict[str, int] = {}
+    palette_index = 0
+    previous_color_id = 0
+    initial_values = [clean_text(value) for value in df[INITIAL_MOLD_COLUMN].tolist()]
+    df[COLOR_GROUP_COLUMN] = ""
+
+    run_start = 0
+    while run_start < len(initial_values):
+        initial_mold_no = initial_values[run_start]
+        run_end = run_start
+        while run_end + 1 < len(initial_values) and initial_values[run_end + 1] == initial_mold_no:
+            run_end += 1
+
+        version_count_text = clean_text(df.at[df.index[run_start], "版本数量"]) if initial_mold_no else ""
+        try:
+            version_count = int(float(version_count_text))
+        except ValueError:
+            version_count = 0
+
+        if initial_mold_no and version_count >= 2:
+            color_id = color_by_initial.get(initial_mold_no)
+            if color_id is None:
+                color_id = palette_index % len(GROUP_FILL_COLORS) + 1
+                palette_index += 1
+                if color_id == previous_color_id:
+                    color_id = palette_index % len(GROUP_FILL_COLORS) + 1
+                    palette_index += 1
+                color_by_initial[initial_mold_no] = color_id
+            df.iloc[run_start : run_end + 1, df.columns.get_loc(COLOR_GROUP_COLUMN)] = color_id
+            previous_color_id = color_id
+
+        run_start = run_end + 1
 
 
 def apply_group_row_colors(workbook, ws, df: pd.DataFrame) -> None:
-    color_group_col = df.columns.get_loc("分组色号") + 1
+    color_group_col = df.columns.get_loc(COLOR_GROUP_COLUMN) + 1
     color_group_col_zero_based = color_group_col - 1
     formats = {
         color_idx: workbook.add_format({"bg_color": f"#{color}"})
         for color_idx, color in enumerate(GROUP_FILL_COLORS, start=1)
     }
 
-    color_ids = pd.to_numeric(df["分组色号"], errors="coerce").fillna(0).astype(int)
-    visible_col_count = df.columns.get_loc("分组色号")
+    color_ids = pd.to_numeric(df[COLOR_GROUP_COLUMN], errors="coerce").fillna(0).astype(int)
+    visible_col_count = df.columns.get_loc(COLOR_GROUP_COLUMN)
     for row_idx, color_id in enumerate(color_ids, start=1):
         if color_id > 0:
             row_values = df.iloc[row_idx - 1, :visible_col_count].tolist()
@@ -138,7 +169,7 @@ def apply_group_row_colors(workbook, ws, df: pd.DataFrame) -> None:
 
     ws.set_column(color_group_col_zero_based, color_group_col_zero_based, None, None, {"hidden": True})
     colored_rows = int(color_ids.gt(0).sum())
-    colored_groups = df.loc[color_ids.gt(0), "初始模具号"].nunique()
+    colored_groups = df.loc[color_ids.gt(0), INITIAL_MOLD_COLUMN].nunique()
     log(f"着色完成: 共覆盖 {colored_groups} 个多版本分组，{colored_rows} 行。")
 
 
@@ -154,8 +185,8 @@ def apply_child_subgroup_borders(workbook, ws, df: pd.DataFrame) -> None:
 
     target_col_indexes = [df.columns.get_loc(col) for col in target_columns]
     group_formats: dict[tuple[int, bool, bool, bool, bool], object] = {}
-    colored_mask = pd.to_numeric(df["分组色号"], errors="coerce").fillna(0).astype(int).gt(0)
-    initial_values = [clean_text(value) for value in df["初始模具号"].tolist()]
+    colored_mask = pd.to_numeric(df[COLOR_GROUP_COLUMN], errors="coerce").fillna(0).astype(int).gt(0)
+    initial_values = [clean_text(value) for value in df[INITIAL_MOLD_COLUMN].tolist()]
     child_values = [clean_text(value) for value in df[SUBGROUP_KEY_COLUMN].tolist()]
 
     colored_subgroups = 0
@@ -198,7 +229,7 @@ def apply_child_subgroup_borders(workbook, ws, df: pd.DataFrame) -> None:
             while child_end + 1 <= main_end and child_values[child_end + 1] == child_no:
                 child_end += 1
 
-            color_id = int(pd.to_numeric(df.at[df.index[child_start], "分组色号"], errors="coerce"))
+            color_id = int(pd.to_numeric(df.at[df.index[child_start], COLOR_GROUP_COLUMN], errors="coerce"))
             for row_idx in range(child_start, child_end + 1):
                 for position, col_idx in enumerate(target_col_indexes):
                     value = df.iat[row_idx, col_idx]
@@ -223,48 +254,76 @@ def apply_child_subgroup_borders(workbook, ws, df: pd.DataFrame) -> None:
     log(f"子组边框完成: 共覆盖 {colored_subgroups} 个子组，{colored_rows} 行。")
 
 
-def assign_group_color_ids(df: pd.DataFrame) -> None:
-    color_by_initial: dict[str, int] = {}
-    palette_index = 0
-    previous_color_id = 0
-    initial_values = [clean_text(value) for value in df["初始模具号"].tolist()]
-    df["分组色号"] = ""
+def build_version_columns(found_versions: set[str]) -> list[str]:
+    extra_versions = sorted(found_versions - set("0ABCDEF"))
+    return DEFAULT_VERSION_COLUMNS + [f"{letter}版" for letter in extra_versions]
 
-    run_start = 0
-    while run_start < len(initial_values):
-        initial_mold_no = initial_values[run_start]
-        run_end = run_start
-        while run_end + 1 < len(initial_values) and initial_values[run_end + 1] == initial_mold_no:
-            run_end += 1
 
-        version_count_text = clean_text(df.at[df.index[run_start], "版本数量"]) if initial_mold_no else ""
-        try:
-            version_count = int(float(version_count_text))
-        except ValueError:
-            version_count = 0
+def add_version_columns(df: pd.DataFrame, version_columns: list[str]) -> None:
+    for col in BASE_NEW_COLUMNS + VERSION_SUMMARY_COLUMNS + version_columns:
+        df[col] = ""
 
-        if initial_mold_no and version_count >= 2:
-            color_id = color_by_initial.get(initial_mold_no)
-            if color_id is None:
-                color_id = palette_index % len(GROUP_FILL_COLORS) + 1
-                palette_index += 1
-                if color_id == previous_color_id:
-                    color_id = palette_index % len(GROUP_FILL_COLORS) + 1
-                    palette_index += 1
-                color_by_initial[initial_mold_no] = color_id
-            df.iloc[run_start : run_end + 1, df.columns.get_loc("分组色号")] = color_id
-            previous_color_id = color_id
 
-        run_start = run_end + 1
+def fill_parsed_version_columns(
+    df: pd.DataFrame,
+    parsed_rows: list[tuple[str, str, str]],
+) -> None:
+    for row_idx, (package_mold_no, initial_mold_no, version) in tqdm(
+        zip(df.index, parsed_rows),
+        total=len(parsed_rows),
+        desc="回填版本列",
+        unit="行",
+        file=sys.stdout,
+    ):
+        df.at[row_idx, PACKAGE_MOLD_COLUMN] = package_mold_no
+        df.at[row_idx, INITIAL_MOLD_COLUMN] = initial_mold_no
+        if version:
+            df.at[row_idx, f"{version}版"] = version
+
+
+def fill_version_summary(df: pd.DataFrame, version_columns: list[str]) -> None:
+    versions_by_initial: dict[str, set[str]] = {}
+    for row_idx in tqdm(df.index, total=len(df), desc="建立版本分组", unit="行", file=sys.stdout):
+        initial_mold_no = clean_text(df.at[row_idx, INITIAL_MOLD_COLUMN])
+        if not initial_mold_no:
+            continue
+
+        versions_by_initial.setdefault(initial_mold_no, set())
+        for col in version_columns:
+            version = clean_text(df.at[row_idx, col])
+            if version:
+                versions_by_initial[initial_mold_no].add(version)
+
+    version_order = [col.removesuffix("版") for col in version_columns]
+    version_summary_by_initial: dict[str, tuple[str, str, int]] = {}
+    for initial_mold_no, versions in versions_by_initial.items():
+        ordered_versions = [version for version in version_order if version in versions]
+        if ordered_versions:
+            history = "" if ordered_versions == ["0"] else f"【{''.join(ordered_versions)}】"
+            current_version = f"-{ordered_versions[-1]}-"
+            version_summary_by_initial[initial_mold_no] = (history, current_version, len(ordered_versions))
+
+    for row_idx in tqdm(df.index, total=len(df), desc="回填分组版本", unit="行", file=sys.stdout):
+        initial_mold_no = clean_text(df.at[row_idx, INITIAL_MOLD_COLUMN])
+        summary = version_summary_by_initial.get(initial_mold_no)
+        if summary:
+            df.at[row_idx, "变更履历"] = summary[0]
+            df.at[row_idx, "当前版本"] = summary[1]
+            df.at[row_idx, "版本数量"] = summary[2]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="提取模具版本并按初始模具号汇总履历")
+    parser.add_argument("--input", default=INPUT_FILE_NAME, help=f"输入 Excel 文件，默认: {INPUT_FILE_NAME}")
+    parser.add_argument("--sheet", default=INPUT_SHEET_NAME, help=f"目标工作表，默认: {INPUT_SHEET_NAME}")
+    parser.add_argument("--output", default=None, help="输出 Excel 文件，默认在输入文件名后追加处理时间")
+    parser.add_argument("--subborder", action="store_true", help="对已染色分组内的成套模具号子组添加边框标识")
+    return parser.parse_args()
 
 
 def main() -> None:
     configure_console_encoding()
-
-    parser = argparse.ArgumentParser(description="提取模具版本并按初始模具号汇总履历")
-    parser.add_argument("--input", default=INPUT_FILE_NAME, help=f"输入 Excel 文件，默认: {INPUT_FILE_NAME}")
-    parser.add_argument("--sheet", default=INPUT_SHEET_NAME, help=f"目标工作表，默认: {INPUT_SHEET_NAME}")
-    args = parser.parse_args()
+    args = parse_args()
 
     log("开始处理分析结果模具版本列。")
     input_path = resolve_input_file(args.input)
@@ -287,22 +346,16 @@ def main() -> None:
     found_versions: set[str] = set()
 
     for row_idx in tqdm(df1.index, total=len(df1), desc="解析子件号", unit="行", file=sys.stdout):
-        AA = ""
-        BB = ""
-        CC = ""
-        AA, BB, CC = split_child_no(df1.at[row_idx, CHILD_COLUMN])
-        parsed_rows.append((AA, BB, CC))
-        if CC:
-            found_versions.add(CC)
+        package_mold_no, initial_mold_no, version = split_child_no(df1.at[row_idx, CHILD_COLUMN])
+        parsed_rows.append((package_mold_no, initial_mold_no, version))
+        if version:
+            found_versions.add(version)
 
-    extra_versions = sorted(found_versions - set("0ABCDEF"))
-    version_columns = DEFAULT_VERSION_COLUMNS + [f"{letter}版" for letter in extra_versions]
-    new_columns = BASE_NEW_COLUMNS + VERSION_SUMMARY_COLUMNS + version_columns
+    version_columns = build_version_columns(found_versions)
 
     log("步骤2/5: 追加空白列。")
-    for col in new_columns:
-        df1[col] = ""
-    log("已新增变更履历、当前版本、版本数量和 0版 列。")
+    add_version_columns(df1, version_columns)
+    log("已新增变更履历、当前版本、版本数量和版本列。")
 
     if found_versions:
         detected = "、".join(sorted(found_versions))
@@ -313,49 +366,12 @@ def main() -> None:
         log("未检测到额外版本，仅保留默认 0版、A版-F版 空白列。")
 
     log("步骤3/5: 回填成套模具号、初始模具号和版本列。")
-    for row_idx, (AA, BB, CC) in tqdm(
-        zip(df1.index, parsed_rows),
-        total=len(parsed_rows),
-        desc="回填版本列",
-        unit="行",
-        file=sys.stdout,
-    ):
-        df1.at[row_idx, "成套模具号"] = AA
-        df1.at[row_idx, "初始模具号"] = BB
-        if CC:
-            df1.at[row_idx, f"{CC}版"] = CC
+    fill_parsed_version_columns(df1, parsed_rows)
 
     log("步骤4/5: 按初始模具号合并变更履历并计算当前版本。")
-    versions_by_initial: dict[str, set[str]] = {}
-    for row_idx in tqdm(df1.index, total=len(df1), desc="建立版本分组", unit="行", file=sys.stdout):
-        initial_mold_no = clean_text(df1.at[row_idx, "初始模具号"])
-        if not initial_mold_no:
-            continue
+    fill_version_summary(df1, version_columns)
 
-        versions_by_initial.setdefault(initial_mold_no, set())
-        for col in version_columns:
-            version = clean_text(df1.at[row_idx, col])
-            if version:
-                versions_by_initial[initial_mold_no].add(version)
-
-    version_order = [col.removesuffix("版") for col in version_columns]
-    version_summary_by_initial: dict[str, tuple[str, str, int]] = {}
-    for initial_mold_no, versions in versions_by_initial.items():
-        ordered_versions = [version for version in version_order if version in versions]
-        if ordered_versions:
-            history = "" if ordered_versions == ["0"] else f"【{''.join(ordered_versions)}】"
-            current_version = f"-{ordered_versions[-1]}-"
-            version_summary_by_initial[initial_mold_no] = (history, current_version, len(ordered_versions))
-
-    for row_idx in tqdm(df1.index, total=len(df1), desc="回填分组版本", unit="行", file=sys.stdout):
-        initial_mold_no = clean_text(df1.at[row_idx, "初始模具号"])
-        summary = version_summary_by_initial.get(initial_mold_no)
-        if summary:
-            df1.at[row_idx, "变更履历"] = summary[0]
-            df1.at[row_idx, "当前版本"] = summary[1]
-            df1.at[row_idx, "版本数量"] = summary[2]
-
-    output_path = build_output_path(input_path)
+    output_path = build_output_path(input_path, args.output)
     assign_group_color_ids(df1)
     log("步骤5/6: 写出处理后的分析结果。")
     log(f"输出文件: {output_path.resolve()}")
@@ -363,8 +379,9 @@ def main() -> None:
         df1.to_excel(writer, sheet_name=sheet_name, index=False)
         log("步骤6/6: 仅对版本数量>=2的分组着色。")
         apply_group_row_colors(writer.book, writer.sheets[sheet_name], df1)
-        log("额外步骤: 对已染色分组内的成套模具号子组进行四列边框标识。")
-        apply_child_subgroup_borders(writer.book, writer.sheets[sheet_name], df1)
+        if args.subborder:
+            log("额外步骤: 对已染色分组内的成套模具号子组进行边框标识。")
+            apply_child_subgroup_borders(writer.book, writer.sheets[sheet_name], df1)
 
     log("处理完成。")
 

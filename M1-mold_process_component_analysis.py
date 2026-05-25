@@ -14,10 +14,9 @@ except ImportError:  # 兼容未安装 tqdm 的环境。
         return iterable
 
 
-INPUT_591E = Path("591E20260409.xlsx")
+INPUT_591E = Path("1-591E20260520-1.xlsx")
 INPUT_MATERIAL_LIST = Path("2-物料列表.xlsx")
 INPUT_NITRIDING_DETAIL = Path("3-氮化明细.xlsx")
-OUTPUT_FILE = Path("1510-过程组件分析结果.xlsx")
 
 PROCESS_SUFFIXES = {"MC", "MR", "MN"}
 PROCESS_COLUMNS = {
@@ -25,6 +24,7 @@ PROCESS_COLUMNS = {
     "MR": "热处理",
     "MN": "氮化",
 }
+STATUS_COLUMNS = ["基本视图状态", "工厂视图状态"]
 
 
 def configure_console_encoding() -> None:
@@ -69,6 +69,37 @@ def find_column(df: pd.DataFrame, candidates: list[str], table_name: str) -> str
     raise KeyError(f"{table_name} 缺少必要列，候选列名: {candidates}")
 
 
+def find_optional_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def normalize_status_code(value: object) -> str:
+    text = to_clean_text(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number.is_integer() and 0 <= number < 100:
+        return f"{int(number):02d}"
+    return text
+
+
+def normalize_status_columns(df: pd.DataFrame) -> None:
+    for col in STATUS_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].map(normalize_status_code)
+
+
+def build_output_path() -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+    return Path(f"M1-分析结果-D物料过程组件分析-{timestamp}.xlsx")
+
+
 def split_material_code(value: object) -> tuple[str, str]:
     text = to_clean_text(value)
     tail = text[-2:].upper() if len(text) >= 2 else ""
@@ -94,6 +125,7 @@ def append_new_materials(df2: pd.DataFrame, df1a: pd.DataFrame) -> pd.DataFrame:
                 {
                     "子件号": s4_material,
                     "成品物料号": "",
+                    "基本视图状态": "",
                     "是否为新增物料": "是",
                     "粗加工": "",
                     "热处理": "",
@@ -120,7 +152,9 @@ def main() -> None:
 
     log("步骤 1/8：读取 591E 数据。")
     df1 = pd.read_excel(INPUT_591E)
-    material_col = find_column(df1, ["物料号", "物料"], "591E20260409.xlsx")
+    normalize_status_columns(df1)
+    material_col = find_column(df1, ["物料编码", "物料号", "物料"], INPUT_591E.name)
+    basic_status_col = find_optional_column(df1, ["基本视图状态"])
     log(f"读取完成：df1 共 {len(df1)} 行，使用物料列“{material_col}”。")
 
     log("步骤 2/8：拆分 df1 物料号，生成“子件号”和“工序”。")
@@ -136,7 +170,7 @@ def main() -> None:
 
     log("步骤 3/8：提取 df1 子件号去重结果，生成 df2。")
     df2 = df1[["子件号"]].drop_duplicates().reset_index(drop=True)
-    for col in ["成品物料号", "是否为新增物料", "粗加工", "热处理", "氮化"]:
+    for col in ["成品物料号", "基本视图状态", "是否为新增物料", "粗加工", "热处理", "氮化"]:
         ensure_blank_column(df2, col)
     log(f"df2 初始去重后共 {len(df2)} 行。")
 
@@ -172,6 +206,8 @@ def main() -> None:
             df2.at[t, PROCESS_COLUMNS[DD]] = DD
         else:
             df2.at[t, "成品物料号"] = CC
+            if basic_status_col is not None:
+                df2.at[t, "基本视图状态"] = df1.at[i, basic_status_col]
 
     log("步骤 6/8：读取 3-氮化明细.xlsx，生成 S4物料号。")
     ensure_blank_column(df2, "是否存在氮化记录")
@@ -201,7 +237,8 @@ def main() -> None:
     log(f"氮化记录匹配完成：共匹配 {matched_nitriding_count} 条。")
 
     log("步骤 8/8：写入处理后模具数据.xlsx。")
-    actual_output = OUTPUT_FILE
+    output_file = build_output_path()
+    actual_output = output_file
     try:
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")
@@ -213,10 +250,10 @@ def main() -> None:
             log("正在写入 sheet：分析结果")
             df2.to_excel(writer, sheet_name="分析结果", index=False)
     except PermissionError:
-        actual_output = OUTPUT_FILE.with_name(
-            f"{OUTPUT_FILE.stem}_{datetime.now():%Y%m%d_%H%M%S}{OUTPUT_FILE.suffix}"
+        actual_output = output_file.with_name(
+            f"{output_file.stem}_{datetime.now():%S}{output_file.suffix}"
         )
-        log(f"无法覆盖 {OUTPUT_FILE}，文件可能正在打开。")
+        log(f"无法覆盖 {output_file}，文件可能正在打开。")
         log(f"正在改为另存到: {actual_output.resolve()}")
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")

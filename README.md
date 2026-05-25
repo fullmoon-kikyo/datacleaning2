@@ -4,11 +4,10 @@ Python scripts for cleaning and transforming S4 mold/material Excel data.
 
 ## Scripts
 
-- `process_mold_data.py`: legacy process component analysis script. It reads 591E material data, material list data, and nitriding detail data, then produces an analysis workbook.
-- `clean_mold_data_20260414.py`: newer mold data cleaning script. It adds material freeze status, BOM status checks, process suffix handling, nitriding matching, and formatted Excel output.
-- `clean_bom_transform.py`: consolidates EA/ZM BOM conversion relationships and marks missing or abnormal conversion records.
-- `extract_mold_versions.py`: extracts and summarizes mold version history from processed analysis results.
-- `extract_mold_versions_subborder.py`: variant of mold version extraction for sub-border style mold numbers.
+- `M1-mold_process_component_analysis.py`: standard mold process component analysis. It keeps the simpler M1 result structure, preserves `基本视图状态` and `工厂视图状态` as two-character text values such as `09`, and writes output files named `M1-分析结果-D物料过程组件分析-YYYYMMDD-HHMM.xlsx`.
+- `M1.1-mold_process_component_analysis_enhancement.py`: enhanced mold process component analysis. It adds material freeze status, missing BOM status, `MT` nitriding suffix support, dated output naming, and formatted Excel output.
+- `M2-mold_drawing_version_extract.py`: extracts and summarizes mold drawing version history from processed analysis results. Use `--subborder` to add subgroup border formatting.
+- `M3-bom_transition_relationship.py`: consolidates EA/ZM BOM transition relationships and marks missing or abnormal conversion records.
 
 ## Environment
 
@@ -23,9 +22,11 @@ pip install pandas openpyxl tqdm
 Run a script directly from this directory:
 
 ```powershell
-python clean_mold_data_20260414.py
-python clean_bom_transform.py
-python process_mold_data.py
+python M1-mold_process_component_analysis.py
+python M1.1-mold_process_component_analysis_enhancement.py
+python M2-mold_drawing_version_extract.py
+python M2-mold_drawing_version_extract.py --subborder
+python M3-bom_transition_relationship.py
 ```
 
 Input and output Excel files are intentionally not committed to Git. Put the required source files in the project directory before running the scripts.
