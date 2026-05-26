@@ -15,8 +15,9 @@ except ImportError:  # 兼容未安装 tqdm 的环境。
 
 
 INPUT_591E = Path("1-591E20260520-1.xlsx")
-INPUT_MATERIAL_LIST = Path("2-物料列表.xlsx")
-INPUT_NITRIDING_DETAIL = Path("3-氮化明细.xlsx")
+OUTSOURCE_SUMMARY_PATTERN = "2-模具外委数据汇总-*.xlsx"
+MATERIAL_LIST_SHEET = "3-外委明细"
+NITRIDING_DETAIL_SHEET = "4-氮化明细"
 
 PROCESS_SUFFIXES = {"MC", "MR", "MN"}
 PROCESS_COLUMNS = {
@@ -25,6 +26,7 @@ PROCESS_COLUMNS = {
     "MN": "氮化",
 }
 STATUS_COLUMNS = ["基本视图状态", "工厂视图状态"]
+CORRECTED_MOLD_COLUMN = "模具号-修正"
 
 
 def configure_console_encoding() -> None:
@@ -96,8 +98,29 @@ def normalize_status_columns(df: pd.DataFrame) -> None:
 
 
 def build_output_path() -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    return Path(f"M1-分析结果-D物料过程组件分析-{timestamp}.xlsx")
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d-%H%M%S") + f"{now.microsecond // 10000:02d}"
+    return Path(f"M2-分析结果-D物料过程组件分析-{timestamp}.xlsx")
+
+
+def find_latest_outsource_summary() -> Path:
+    candidates = [
+        path
+        for path in Path(".").glob(OUTSOURCE_SUMMARY_PATTERN)
+        if path.is_file() and not path.name.startswith("~$")
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERN}")
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def read_outsource_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    excel = pd.ExcelFile(path)
+    if sheet_name not in excel.sheet_names:
+        raise KeyError(f"{path.name} 缺少工作表：{sheet_name}")
+    df = pd.read_excel(excel, sheet_name=sheet_name, dtype={"模具号": str})
+    df.columns = [str(col).strip() for col in df.columns]
+    return df
 
 
 def split_material_code(value: object) -> tuple[str, str]:
@@ -144,11 +167,13 @@ def append_new_materials(df2: pd.DataFrame, df1a: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     configure_console_encoding()
+    outsource_summary_path = find_latest_outsource_summary()
 
     log("开始处理 Excel 数据。")
     log(f"输入文件 1: {INPUT_591E.resolve()}")
-    log(f"输入文件 2: {INPUT_MATERIAL_LIST.resolve()}")
-    log(f"输入文件 3: {INPUT_NITRIDING_DETAIL.resolve()}")
+    log(f"外委数据汇总文件: {outsource_summary_path.resolve()}")
+    log(f"外委清单 sheet: {MATERIAL_LIST_SHEET}")
+    log(f"氮化明细 sheet: {NITRIDING_DETAIL_SHEET}")
 
     log("步骤 1/8：读取 591E 数据。")
     df1 = pd.read_excel(INPUT_591E)
@@ -174,9 +199,9 @@ def main() -> None:
         ensure_blank_column(df2, col)
     log(f"df2 初始去重后共 {len(df2)} 行。")
 
-    log("步骤 4/8：读取 2-物料列表.xlsx，生成 S4物料号并比对新增物料。")
-    df1A = pd.read_excel(INPUT_MATERIAL_LIST, dtype={"模具号": str})
-    mold_col_1a = find_column(df1A, ["模具号"], "2-物料列表.xlsx")
+    log(f"步骤 4/8：读取 {outsource_summary_path.name} / {MATERIAL_LIST_SHEET}，生成 S4物料号并比对新增物料。")
+    df1A = read_outsource_sheet(outsource_summary_path, MATERIAL_LIST_SHEET)
+    mold_col_1a = find_column(df1A, [CORRECTED_MOLD_COLUMN], f"{outsource_summary_path.name}/{MATERIAL_LIST_SHEET}")
     df1A["S4物料号"] = ""
     for i in progress(df1A.index, desc="生成 df1A S4物料号", total=len(df1A), colour="magenta"):
         mold_no = to_clean_text(df1A.at[i, mold_col_1a])
@@ -209,11 +234,11 @@ def main() -> None:
             if basic_status_col is not None:
                 df2.at[t, "基本视图状态"] = df1.at[i, basic_status_col]
 
-    log("步骤 6/8：读取 3-氮化明细.xlsx，生成 S4物料号。")
+    log(f"步骤 6/8：读取 {outsource_summary_path.name} / {NITRIDING_DETAIL_SHEET}，生成 S4物料号。")
     ensure_blank_column(df2, "是否存在氮化记录")
 
-    df3 = pd.read_excel(INPUT_NITRIDING_DETAIL, dtype={"模具号": str})
-    mold_col_3 = find_column(df3, ["模具号"], "3-氮化明细.xlsx")
+    df3 = read_outsource_sheet(outsource_summary_path, NITRIDING_DETAIL_SHEET)
+    mold_col_3 = find_column(df3, [CORRECTED_MOLD_COLUMN], f"{outsource_summary_path.name}/{NITRIDING_DETAIL_SHEET}")
     df3["S4物料号"] = ""
     for i in progress(df3.index, desc="生成 df3 S4物料号", total=len(df3), colour="magenta"):
         mold_no = to_clean_text(df3.at[i, mold_col_3])
@@ -243,8 +268,8 @@ def main() -> None:
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")
             df1.to_excel(writer, sheet_name="Data", index=False)
-            log("正在写入 sheet：外委明细")
-            df1A.to_excel(writer, sheet_name="外委明细", index=False)
+            log("正在写入 sheet：外委清单")
+            df1A.to_excel(writer, sheet_name="外委清单", index=False)
             log("正在写入 sheet：氮化明细")
             df3.to_excel(writer, sheet_name="氮化明细", index=False)
             log("正在写入 sheet：分析结果")
@@ -258,8 +283,8 @@ def main() -> None:
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")
             df1.to_excel(writer, sheet_name="Data", index=False)
-            log("正在写入 sheet：外委明细")
-            df1A.to_excel(writer, sheet_name="外委明细", index=False)
+            log("正在写入 sheet：外委清单")
+            df1A.to_excel(writer, sheet_name="外委清单", index=False)
             log("正在写入 sheet：氮化明细")
             df3.to_excel(writer, sheet_name="氮化明细", index=False)
             log("正在写入 sheet：分析结果")
@@ -268,7 +293,7 @@ def main() -> None:
     log("处理完成。")
     log(f"输出文件: {actual_output.resolve()}")
     log(f"Data 行数: {len(df1)}")
-    log(f"外委明细 行数: {len(df1A)}")
+    log(f"外委清单 行数: {len(df1A)}")
     log(f"氮化明细 行数: {len(df3)}")
     log(f"分析结果 行数: {len(df2)}")
 

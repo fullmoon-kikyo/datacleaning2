@@ -23,16 +23,17 @@ DEFAULT_591E_CANDIDATES = [
     Path("1-591E20260414.xlsx"),
     Path("591E20260409.xlsx"),
 ]
-DEFAULT_MATERIAL_LIST = Path("2-物料列表.xlsx")
-DEFAULT_NITRIDING_DETAIL = Path("3-氮化明细.xlsx")
+OUTSOURCE_SUMMARY_PATTERN = "2-模具外委数据汇总-*.xlsx"
 OUTPUT_FILE_PREFIX = "处理后模具数据"
 
 MAIN_SHEET = "Data"
+MATERIAL_LIST_SHEET = "3-外委明细"
+NITRIDING_DETAIL_SHEET = "4-氮化明细"
 PROCESS_SUFFIXES = {"MC", "MR", "MN", "MT"}
 MATERIAL_COLUMNS = ["物料编码", "物料号", "物料"]
 FREEZE_STATUS_COLUMNS = ["基本视图状态"]
 BOM_QTY_COLUMNS = ["BOM基本数量"]
-MOLD_COLUMNS = ["模具号"]
+MOLD_COLUMNS = ["模具号-修正"]
 
 PRODUCT_COL = "成品物料号"
 NEW_MATERIAL_COL = "是否为新增物料"
@@ -156,7 +157,20 @@ def first_existing_path(candidates: list[Path]) -> Path:
 def build_output_path(output: str | None = None) -> Path:
     if output:
         return Path(output)
-    return Path(f"{OUTPUT_FILE_PREFIX}_{datetime.now():%Y%m%d}.xlsx")
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d-%H%M%S") + f"{now.microsecond // 10000:02d}"
+    return Path(f"{OUTPUT_FILE_PREFIX}_{timestamp}.xlsx")
+
+
+def find_latest_outsource_summary() -> Path:
+    candidates = [
+        path
+        for path in Path(".").glob(OUTSOURCE_SUMMARY_PATTERN)
+        if path.is_file() and not path.name.startswith("~$")
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERN}")
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def read_excel_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -165,6 +179,15 @@ def read_excel_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     if selected_sheet == 0 and sheet_name not in excel.sheet_names:
         log(f"{path.name} 未找到工作表 {sheet_name}，改为读取第一个工作表。")
     return pd.read_excel(excel, sheet_name=selected_sheet)
+
+
+def read_outsource_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    excel = pd.ExcelFile(path)
+    if sheet_name not in excel.sheet_names:
+        raise KeyError(f"{path.name} 缺少工作表：{sheet_name}")
+    df = pd.read_excel(excel, sheet_name=sheet_name, dtype={"模具号": str})
+    df.columns = [str(col).strip() for col in df.columns]
+    return df
 
 
 def create_row_index(df: pd.DataFrame, key_col: str, desc: str) -> dict[str, int]:
@@ -320,12 +343,12 @@ def write_excel(
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         log("正在写入 sheet: Data")
         df1.to_excel(writer, sheet_name="Data", index=False)
-        log("正在写入 sheet: 物料生产记录")
-        material_records.to_excel(writer, sheet_name="物料生产记录", index=False)
+        log("正在写入 sheet: 外委清单")
+        material_records.to_excel(writer, sheet_name="外委清单", index=False)
         log("正在写入 sheet: 处理结果")
         df2.to_excel(writer, sheet_name="处理结果", index=False)
-        log("正在写入 sheet: 氮化记录")
-        nitriding_records.to_excel(writer, sheet_name="氮化记录", index=False)
+        log("正在写入 sheet: 氮化明细")
+        nitriding_records.to_excel(writer, sheet_name="氮化明细", index=False)
         if apply_format:
             beautify_result_sheet(writer.sheets["处理结果"])
 
@@ -355,8 +378,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="清洗模具物料数据并生成过程组件分析结果")
     parser.add_argument("--input", default=str(default_input), help=f"591E 输入文件，默认: {default_input}")
     parser.add_argument("--sheet", default=MAIN_SHEET, help=f"591E 工作表名，默认: {MAIN_SHEET}")
-    parser.add_argument("--material-list", default=str(DEFAULT_MATERIAL_LIST), help="物料列表文件")
-    parser.add_argument("--nitriding-detail", default=str(DEFAULT_NITRIDING_DETAIL), help="氮化明细文件")
+    parser.add_argument(
+        "--outsource-summary",
+        default=None,
+        help=f"外委数据汇总文件，默认自动选择最新的 {OUTSOURCE_SUMMARY_PATTERN}",
+    )
     parser.add_argument("--output", default=None, help="输出文件名，默认按日期生成")
     parser.add_argument("--no-format", action="store_true", help="不对输出 Excel 添加颜色和条件格式")
     return parser.parse_args()
@@ -367,24 +393,24 @@ def main() -> None:
     args = parse_args()
 
     input_591e = Path(args.input)
-    material_list_path = Path(args.material_list)
-    nitriding_detail_path = Path(args.nitriding_detail)
+    outsource_summary_path = Path(args.outsource_summary) if args.outsource_summary else find_latest_outsource_summary()
     output_path = build_output_path(args.output)
 
     log("开始读取 Excel 文件。")
     log(f"591E 输入文件: {input_591e.resolve()}")
-    log(f"物料列表文件: {material_list_path.resolve()}")
-    log(f"氮化明细文件: {nitriding_detail_path.resolve()}")
+    log(f"外委数据汇总文件: {outsource_summary_path.resolve()}")
+    log(f"外委清单 sheet: {MATERIAL_LIST_SHEET}")
+    log(f"氮化明细 sheet: {NITRIDING_DETAIL_SHEET}")
 
     df1 = read_excel_sheet(input_591e, args.sheet)
-    material_records = pd.read_excel(material_list_path, dtype={"模具号": str})
-    nitriding_records = pd.read_excel(nitriding_detail_path, dtype={"模具号": str})
+    material_records = read_outsource_sheet(outsource_summary_path, MATERIAL_LIST_SHEET)
+    nitriding_records = read_outsource_sheet(outsource_summary_path, NITRIDING_DETAIL_SHEET)
 
     material_col = find_column(df1, MATERIAL_COLUMNS, input_591e.name)
     freeze_col = find_column(df1, FREEZE_STATUS_COLUMNS, input_591e.name, required=False)
     bom_qty_col = find_column(df1, BOM_QTY_COLUMNS, input_591e.name, required=False)
-    find_column(material_records, MOLD_COLUMNS, material_list_path.name)
-    find_column(nitriding_records, MOLD_COLUMNS, nitriding_detail_path.name)
+    find_column(material_records, MOLD_COLUMNS, f"{outsource_summary_path.name}/{MATERIAL_LIST_SHEET}")
+    find_column(nitriding_records, MOLD_COLUMNS, f"{outsource_summary_path.name}/{NITRIDING_DETAIL_SHEET}")
 
     log("处理 Data: 标记冻结/BOM状态，并拆分物料编码。")
     mark_df1_status(df1, input_591e.name, freeze_col, bom_qty_col)
@@ -394,15 +420,15 @@ def main() -> None:
     df2 = df1[[CHILD_COL]].drop_duplicates().reset_index(drop=True)
     add_blank_columns(df2, DF2_COLUMNS)
 
-    log("处理物料列表: 生成 S4物料号并追加新增物料。")
-    add_s4_material_column(material_records, material_list_path.name)
+    log("处理外委清单: 生成 S4物料号并追加新增物料。")
+    add_s4_material_column(material_records, f"{outsource_summary_path.name}/{MATERIAL_LIST_SHEET}")
     df2 = append_new_materials(df2, material_records)
 
     log("回填工序、冻结状态和 BOM 状态。")
     fill_process_columns(df1, df2, material_col)
 
     log("处理氮化明细: 生成 S4物料号并匹配氮化记录。")
-    add_s4_material_column(nitriding_records, nitriding_detail_path.name)
+    add_s4_material_column(nitriding_records, f"{outsource_summary_path.name}/{NITRIDING_DETAIL_SHEET}")
     fill_nitriding_record(df2, nitriding_records)
 
     log("写入输出文件。")
@@ -418,9 +444,9 @@ def main() -> None:
     log("处理完成。")
     log(f"输出文件: {actual_output.resolve()}")
     log(f"Data 行数: {len(df1)}")
-    log(f"物料生产记录 行数: {len(material_records)}")
+    log(f"外委清单 行数: {len(material_records)}")
     log(f"处理结果 行数: {len(df2)}")
-    log(f"氮化记录 行数: {len(nitriding_records)}")
+    log(f"氮化明细 行数: {len(nitriding_records)}")
 
 
 if __name__ == "__main__":
