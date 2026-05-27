@@ -27,6 +27,7 @@ PROCESS_COLUMNS = {
 }
 STATUS_COLUMNS = ["基本视图状态", "工厂视图状态"]
 CORRECTED_MOLD_COLUMN = "模具号-修正"
+BOM_BASIC_QTY_COLUMN = "BOM基本数量"
 
 
 def configure_console_encoding() -> None:
@@ -95,6 +96,11 @@ def normalize_status_columns(df: pd.DataFrame) -> None:
     for col in STATUS_COLUMNS:
         if col in df.columns:
             df[col] = df[col].map(normalize_status_code)
+
+
+def is_nonzero_series(series: pd.Series) -> pd.Series:
+    numeric_values = pd.to_numeric(series, errors="coerce").fillna(0)
+    return numeric_values != 0
 
 
 def build_output_path() -> Path:
@@ -225,24 +231,30 @@ def main() -> None:
 
     log("步骤 1/8：读取 591E 数据。")
     df1 = read_excel_fast(INPUT_591E)
-    normalize_status_columns(df1)
-    material_col = find_column(df1, ["物料编码", "物料号", "物料"], INPUT_591E.name)
-    basic_status_col = find_optional_column(df1, ["基本视图状态"])
-    log(f"读取完成：df1 共 {len(df1)} 行，使用物料列“{material_col}”。")
+    bom_basic_qty_col = find_column(df1, [BOM_BASIC_QTY_COLUMN], INPUT_591E.name)
+    df1_0 = df1.loc[is_nonzero_series(df1[bom_basic_qty_col])].copy().reset_index(drop=True)
+    normalize_status_columns(df1_0)
+    material_col = find_column(df1_0, ["物料编码", "物料号", "物料"], INPUT_591E.name)
+    basic_status_col = find_optional_column(df1_0, ["基本视图状态"])
+    log(
+        f"读取完成：df1 共 {len(df1)} 行；"
+        f"df1_0 筛选 {BOM_BASIC_QTY_COLUMN} 不为 0 后共 {len(df1_0)} 行，"
+        f"使用物料列“{material_col}”。"
+    )
 
-    log("步骤 2/8：拆分 df1 物料号，生成“子件号”和“工序”。")
-    ensure_blank_column(df1, "子件号")
-    ensure_blank_column(df1, "工序")
+    log("步骤 2/8：拆分 df1_0 物料号，生成“子件号”和“工序”。")
+    ensure_blank_column(df1_0, "子件号")
+    ensure_blank_column(df1_0, "工序")
 
     AA = ""
     BB = ""
-    for i in progress(df1.index, desc="拆分 df1 物料号", total=len(df1), colour="cyan"):
-        AA, BB = split_material_code(df1.at[i, material_col])
-        df1.at[i, "子件号"] = AA
-        df1.at[i, "工序"] = BB
+    for i in progress(df1_0.index, desc="拆分 df1_0 物料号", total=len(df1_0), colour="cyan"):
+        AA, BB = split_material_code(df1_0.at[i, material_col])
+        df1_0.at[i, "子件号"] = AA
+        df1_0.at[i, "工序"] = BB
 
-    log("步骤 3/8：提取 df1 子件号去重结果，生成 df2。")
-    df2 = df1[["子件号"]].drop_duplicates().reset_index(drop=True)
+    log("步骤 3/8：提取 df1_0 子件号去重结果，生成 df2。")
+    df2 = df1_0[["子件号"]].drop_duplicates().reset_index(drop=True)
     for col in ["成品物料号", "基本视图状态", "是否为新增物料", "粗加工", "热处理", "氮化"]:
         ensure_blank_column(df2, col)
     log(f"df2 初始去重后共 {len(df2)} 行。")
@@ -258,7 +270,7 @@ def main() -> None:
     df2 = append_new_materials(df2, df1A)
     log(f"新增物料比对完成：df2 当前共 {len(df2)} 行。")
 
-    log("步骤 5/8：根据 df1 工序后缀，回填 df2 的成品物料号、粗加工、热处理、氮化列。")
+    log("步骤 5/8：根据 df1_0 工序后缀，回填 df2 的成品物料号、粗加工、热处理、氮化列。")
     row_index_by_child: dict[str, int] = {}
     for i in progress(df2.index, desc="建立 df2 行号索引", total=len(df2), colour="blue"):
         child_no = to_clean_text(df2.at[i, "子件号"])
@@ -267,10 +279,10 @@ def main() -> None:
 
     CC = ""
     DD = ""
-    for i in progress(df1.index, desc="回填 df2 工序信息", total=len(df1), colour="green"):
+    for i in progress(df1_0.index, desc="回填 df2 工序信息", total=len(df1_0), colour="green"):
         CC = ""
         DD = ""
-        CC, DD = split_material_code(df1.at[i, material_col])
+        CC, DD = split_material_code(df1_0.at[i, material_col])
         if not CC or CC not in row_index_by_child:
             continue
 
@@ -280,7 +292,7 @@ def main() -> None:
         else:
             df2.at[t, "成品物料号"] = CC
             if basic_status_col is not None:
-                df2.at[t, "基本视图状态"] = df1.at[i, basic_status_col]
+                df2.at[t, "基本视图状态"] = df1_0.at[i, basic_status_col]
 
     log(f"步骤 6/8：读取 {outsource_summary_path.name} / {NITRIDING_DETAIL_SHEET}，生成 S4物料号。")
     ensure_blank_column(df2, "是否存在氮化记录")
@@ -316,6 +328,8 @@ def main() -> None:
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")
             df1.to_excel(writer, sheet_name="Data", index=False)
+            log("正在写入 sheet：Data-有BOM数据")
+            df1_0.to_excel(writer, sheet_name="Data-有BOM数据", index=False)
             log("正在写入 sheet：外委清单")
             df1A.to_excel(writer, sheet_name="外委清单", index=False)
             log("正在写入 sheet：氮化明细")
@@ -331,6 +345,8 @@ def main() -> None:
         with pd.ExcelWriter(actual_output, engine="openpyxl") as writer:
             log("正在写入 sheet：Data")
             df1.to_excel(writer, sheet_name="Data", index=False)
+            log("正在写入 sheet：Data-有BOM数据")
+            df1_0.to_excel(writer, sheet_name="Data-有BOM数据", index=False)
             log("正在写入 sheet：外委清单")
             df1A.to_excel(writer, sheet_name="外委清单", index=False)
             log("正在写入 sheet：氮化明细")
@@ -341,6 +357,7 @@ def main() -> None:
     log("处理完成。")
     log(f"输出文件: {actual_output.resolve()}")
     log(f"Data 行数: {len(df1)}")
+    log(f"Data-有BOM数据 行数: {len(df1_0)}")
     log(f"外委清单 行数: {len(df1A)}")
     log(f"氮化明细 行数: {len(df3)}")
     log(f"分析结果 行数: {len(df2)}")
