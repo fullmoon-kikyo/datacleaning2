@@ -114,13 +114,61 @@ def find_latest_outsource_summary() -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def make_unique_columns(raw_columns: list[object]) -> list[str]:
+    """生成 DataFrame 列名，保持 pandas 对空列、重复列的常见处理方式。"""
+    columns: list[str] = []
+    seen: dict[str, int] = {}
+    for index, raw_column in enumerate(raw_columns):
+        column = str(raw_column).strip() if raw_column not in (None, "") else f"Unnamed: {index}"
+        count = seen.get(column, 0)
+        seen[column] = count + 1
+        columns.append(column if count == 0 else f"{column}.{count}")
+    return columns
+
+
+def rows_to_dataframe(rows: list[list[object]], table_name: str) -> pd.DataFrame:
+    if not rows:
+        raise ValueError(f"{table_name} 没有可读取的数据。")
+
+    columns = make_unique_columns(rows[0])
+    width = len(columns)
+    normalized_rows = [
+        list(row[:width]) + [""] * max(0, width - len(row))
+        for row in rows[1:]
+    ]
+    return pd.DataFrame(normalized_rows, columns=columns)
+
+
+def read_excel_fast(path: Path, sheet_name: str | int = 0) -> pd.DataFrame:
+    """优先使用 python-calamine 快速读取 xlsx，失败时回退到 pandas/openpyxl。"""
+    try:
+        from python_calamine import load_workbook
+    except ImportError:
+        return pd.read_excel(path, sheet_name=sheet_name)
+
+    try:
+        workbook = load_workbook(str(path))
+        try:
+            if isinstance(sheet_name, int):
+                sheet = workbook.get_sheet_by_index(sheet_name)
+            else:
+                if sheet_name not in workbook.sheet_names:
+                    raise KeyError(f"{path.name} 缺少工作表：{sheet_name}")
+                sheet = workbook.get_sheet_by_name(sheet_name)
+            rows = sheet.to_python(skip_empty_area=False)
+        finally:
+            workbook.close()
+        df = rows_to_dataframe(rows, f"{path.name}/{sheet_name}")
+        df.columns = [str(col).strip() for col in df.columns]
+        return df
+    except Exception as exc:
+        log(f"快速读取 {path.name} 失败，改用 pandas/openpyxl 读取。原因：{exc}")
+        return pd.read_excel(path, sheet_name=sheet_name)
+
+
 def read_outsource_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
-    excel = pd.ExcelFile(path)
-    if sheet_name not in excel.sheet_names:
-        raise KeyError(f"{path.name} 缺少工作表：{sheet_name}")
-    df = pd.read_excel(excel, sheet_name=sheet_name, dtype={"模具号": str})
-    df.columns = [str(col).strip() for col in df.columns]
-    return df
+    return read_excel_fast(path, sheet_name=sheet_name)
+
 
 
 def split_material_code(value: object) -> tuple[str, str]:
@@ -176,7 +224,7 @@ def main() -> None:
     log(f"氮化明细 sheet: {NITRIDING_DETAIL_SHEET}")
 
     log("步骤 1/8：读取 591E 数据。")
-    df1 = pd.read_excel(INPUT_591E)
+    df1 = read_excel_fast(INPUT_591E)
     normalize_status_columns(df1)
     material_col = find_column(df1, ["物料编码", "物料号", "物料"], INPUT_591E.name)
     basic_status_col = find_optional_column(df1, ["基本视图状态"])
