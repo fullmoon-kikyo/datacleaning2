@@ -18,7 +18,7 @@ except ImportError:
 
 
 INPUT_DIR = Path("外委清单")
-OUTPUT_PREFIX = "2-模具外委数据汇总"
+OUTPUT_PREFIX = "M1-模具外委数据汇总"
 SUMMARY_SHEET = "1-汇总"
 DETAIL_SHEET = "2-汇总（去重）"
 OUTSOURCE_DETAIL_SHEET = "3-外委明细"

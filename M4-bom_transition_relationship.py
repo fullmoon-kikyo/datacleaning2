@@ -28,7 +28,7 @@ BASE_FIELDS = [
 
 INPUT_SHEET = "Data"
 INPUT_FILE = "591E20260409-有BOM"
-OUTPUT_FILE = "1511-转换关系整合.xlsx"
+OUTPUT_FILE = "M4-1511-转换关系整合.xlsx"
 NUMERIC_COL_KEYWORDS = ("数量", "分子", "分母")
 
 

@@ -15,7 +15,7 @@ except ImportError:  # 兼容未安装 tqdm 的环境。
 
 
 INPUT_591E = Path("1-591E20260520-1.xlsx")
-OUTSOURCE_SUMMARY_PATTERN = "2-模具外委数据汇总-*.xlsx"
+OUTSOURCE_SUMMARY_PATTERNS = ["M1-模具外委数据汇总-*.xlsx", "2-模具外委数据汇总-*.xlsx"]
 MATERIAL_LIST_SHEET = "3-外委明细"
 NITRIDING_DETAIL_SHEET = "4-氮化明细"
 
@@ -106,17 +106,18 @@ def is_nonzero_series(series: pd.Series) -> pd.Series:
 def build_output_path() -> Path:
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d-%H%M%S") + f"{now.microsecond // 10000:02d}"
-    return Path(f"M2-分析结果-D物料过程组件分析-{timestamp}.xlsx")
+    return Path(f"M2-过程组件分析结果-{timestamp}.xlsx")
 
 
 def find_latest_outsource_summary() -> Path:
     candidates = [
         path
-        for path in Path(".").glob(OUTSOURCE_SUMMARY_PATTERN)
+        for pattern in OUTSOURCE_SUMMARY_PATTERNS
+        for path in Path(".").glob(pattern)
         if path.is_file() and not path.name.startswith("~$")
     ]
     if not candidates:
-        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERN}")
+        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERNS}")
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
@@ -321,7 +322,7 @@ def main() -> None:
             matched_nitriding_count += 1
     log(f"氮化记录匹配完成：共匹配 {matched_nitriding_count} 条。")
 
-    log("步骤 8/8：写入处理后模具数据.xlsx。")
+    log("步骤 8/8：写入过程组件分析结果。")
     output_file = build_output_path()
     actual_output = output_file
     try:

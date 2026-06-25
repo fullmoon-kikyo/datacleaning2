@@ -23,8 +23,8 @@ DEFAULT_591E_CANDIDATES = [
     Path("1-591E20260414.xlsx"),
     Path("591E20260409.xlsx"),
 ]
-OUTSOURCE_SUMMARY_PATTERN = "2-模具外委数据汇总-*.xlsx"
-OUTPUT_FILE_PREFIX = "处理后模具数据"
+OUTSOURCE_SUMMARY_PATTERNS = ["M1-模具外委数据汇总-*.xlsx", "2-模具外委数据汇总-*.xlsx"]
+OUTPUT_FILE_PREFIX = "M2.1-处理后模具数据"
 
 MAIN_SHEET = "Data"
 MATERIAL_LIST_SHEET = "3-外委明细"
@@ -165,11 +165,12 @@ def build_output_path(output: str | None = None) -> Path:
 def find_latest_outsource_summary() -> Path:
     candidates = [
         path
-        for path in Path(".").glob(OUTSOURCE_SUMMARY_PATTERN)
+        for pattern in OUTSOURCE_SUMMARY_PATTERNS
+        for path in Path(".").glob(pattern)
         if path.is_file() and not path.name.startswith("~$")
     ]
     if not candidates:
-        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERN}")
+        raise FileNotFoundError(f"未找到外委数据汇总文件：{OUTSOURCE_SUMMARY_PATTERNS}")
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 

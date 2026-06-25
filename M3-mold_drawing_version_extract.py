@@ -15,8 +15,8 @@ except ImportError:
         return iterable
 
 
-INPUT_FILE_NAME = "1510-过程组件分析结果-20260422.xlsx"
-INPUT_FILE_GLOB = "1510-*20260422.xlsx"
+INPUT_FILE_NAME = "M2-过程组件分析结果"
+INPUT_FILE_GLOB = "M2-过程组件分析结果-*.xlsx"
 INPUT_SHEET_NAME = "分析结果"
 CHILD_COLUMN = "子件号"
 
@@ -72,12 +72,12 @@ def resolve_input_file(input_name: str) -> Path:
         pattern = f"{input_name}*.xls*"
     matches = sorted(Path(".").glob(pattern))
     if matches:
-        return matches[0]
+        return max(matches, key=lambda path: path.stat().st_mtime)
 
     if input_name == INPUT_FILE_NAME:
         matches = sorted(Path(".").glob(INPUT_FILE_GLOB))
         if matches:
-            return matches[0]
+            return max(matches, key=lambda path: path.stat().st_mtime)
 
     raise FileNotFoundError(f"未找到输入文件: {input_name}")
 
@@ -86,7 +86,7 @@ def build_output_path(input_path: Path, output_name: str | None = None) -> Path:
     if output_name:
         return Path(output_name)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return input_path.with_name(f"{input_path.stem}【处理后】{timestamp}{input_path.suffix}")
+    return input_path.with_name(f"M3-{input_path.stem}【处理后】{timestamp}{input_path.suffix}")
 
 
 def split_child_no(value: object) -> tuple[str, str, str]:

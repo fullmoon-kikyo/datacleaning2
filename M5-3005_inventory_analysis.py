@@ -32,7 +32,7 @@ DF5_GROUP_COLORS = [
     "F4B183",
     "A9D18E",
     "B4A7D6",
-    "F4CCCC",
+    "F4B6C2",
     "76D7C4",
 ]
 
@@ -41,7 +41,7 @@ DF5_SUMMARY_COLORS = [
     "F8CBAD",
     "C6E0B4",
     "D9D2E9",
-    "F4B6C2",
+    "F4CCCC",
     "B7E1D8",
 ]
 
@@ -213,6 +213,16 @@ def build_df4(df3: pd.DataFrame, table_name: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["图号", "物料编码", "实物数量", "实物制造号"])
 
 
+def build_df4_summary(df4_dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    columns = ["图号", "物料编码", "实物数量", "实物制造号"]
+    if not df4_dataframes:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(
+        [df4.reindex(columns=columns) for df4 in df4_dataframes.values()],
+        ignore_index=True,
+    )
+
+
 def make_blank_df5_row(columns: list[str]) -> dict[str, object]:
     return {column: "" for column in columns}
 
@@ -245,12 +255,16 @@ def get_df5_row_material_key(row: dict[str, object]) -> str:
 
 def apply_status_to_material_groups(df5: pd.DataFrame) -> pd.DataFrame:
     result = df5.copy()
-    material_keys = result.apply(get_df5_row_material_key, axis=1)
+    stock_material_keys = result["物料"].map(clean_text)
+    physical_material_keys = result["实物物料编码"].map(clean_text)
+    material_keys = stock_material_keys.mask(stock_material_keys == "", physical_material_keys)
+    non_blank_mask = material_keys != ""
 
-    for material_key in material_keys[material_keys != ""].drop_duplicates():
-        group_mask = material_keys == material_key
-        group_status = get_group_status(result.loc[group_mask, "状态"])
-        result.loc[group_mask, "状态"] = group_status
+    result.loc[non_blank_mask, "状态"] = (
+        result.loc[non_blank_mask]
+        .groupby(material_keys[non_blank_mask], sort=False)["状态"]
+        .transform(get_group_status)
+    )
 
     return result
 
@@ -303,6 +317,10 @@ def get_group_quantity_summary(group_rows: list[dict[str, object]]) -> tuple[flo
 def make_df5_summary_row(columns: list[str], group_rows: list[dict[str, object]]) -> dict[str, object]:
     summary_row = make_blank_df5_row(columns)
     summary_row["数据类型"] = "汇总"
+    summary_row["S4物料编码"] = next(
+        (material_key for row in group_rows if (material_key := get_df5_row_material_key(row))),
+        "",
+    )
     summary_row["状态"] = get_group_status(pd.Series(row.get("状态", "") for row in group_rows))
     stock_summary_quantity, physical_quantity, consistency = get_group_quantity_summary(group_rows)
 
@@ -381,7 +399,7 @@ def log_df5_summary(df5: pd.DataFrame) -> None:
 def build_df5(df2: pd.DataFrame, df4_dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:
     df5 = df2.copy()
     df5.insert(0, "数据类型", "库存")
-    new_columns = ["图号", "实物物料编码", "实物数量", "实物制造号", "数量一致性", "状态"]
+    new_columns = ["图号", "实物物料编码", "实物数量", "实物制造号", "数量一致性", "状态", "S4物料编码"]
     for column in new_columns:
         if column not in df5.columns:
             df5[column] = ""
@@ -562,7 +580,7 @@ def safe_sheet_name(name: str, used_names: set[str]) -> str:
 def build_output_path() -> Path:
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d-%H%M%S")
-    return Path(f"03_3005库位盘点结果-{timestamp}.xlsx")
+    return Path(f"M5-3005库位盘点结果-{timestamp}.xlsx")
 
 
 def main() -> None:
@@ -585,6 +603,8 @@ def main() -> None:
         df3_dataframes[df3_name] = df3
         df4_dataframes[df4_name] = build_df4(df3, df4_name)
 
+    df4_summary = build_df4_summary(df4_dataframes)
+
     log("生成 df5 对账结果")
     df5 = build_df5(df2, df4_dataframes)
     log_df5_summary(df5)
@@ -606,6 +626,11 @@ def main() -> None:
                 sheet_name=safe_sheet_name(table_name, used_sheet_names),
                 index=False,
             )
+        df4_summary.to_excel(
+            writer,
+            sheet_name=safe_sheet_name("df4-汇总", used_sheet_names),
+            index=False,
+        )
         df5_sheet_name = safe_sheet_name("df5-对账结果", used_sheet_names)
         df5.to_excel(writer, sheet_name=df5_sheet_name, index=False)
         format_df5_sheet(writer.sheets[df5_sheet_name])
