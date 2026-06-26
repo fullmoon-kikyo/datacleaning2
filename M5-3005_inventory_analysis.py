@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -13,7 +14,8 @@ from openpyxl.utils import get_column_letter
 
 STOCK_FILE_PATTERN = "01_3005*.xlsx"
 STOCK_SHEET_NAME = "Data"
-COUNT_DATA_DIR = Path("02_盘点数据")
+BASE_DIR = Path(__file__).resolve().parent
+COUNT_DATA_DIR = BASE_DIR / "02_盘点数据"
 COUNT_SHEET_NAME = "Sheet1"
 
 STOCK_COLUMN_ALIASES = [
@@ -45,6 +47,27 @@ DF5_SUMMARY_COLORS = [
     "B7E1D8",
 ]
 
+DF5_SYNC_MATCH_COLORS = [
+    "00FFFF",
+    "00FF00",
+    "FF00FF",
+    "00B0F0",
+    "92D050",
+    "FF66CC",
+    "00FF99",
+    "7030A0",
+    "FF9900",
+    "33CCCC",
+    "CC00FF",
+    "66FF33",
+    "FF5050",
+    "0099FF",
+    "CCFF00",
+    "FF33CC",
+]
+DF5_SYNC_STOCK_ONLY_COLOR = "FFFF00"
+DF5_SYNC_PHYSICAL_ONLY_COLOR = "FFFF00"
+
 
 def configure_console_encoding() -> None:
     """尽量保证 Windows 控制台中文输出正常。"""
@@ -70,10 +93,25 @@ def clean_text(value: object) -> str:
     return str(value).strip()
 
 
+def build_simple_manufacture_number(value: object) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    if text.isdigit():
+        return text
+    if re.fullmatch(r"[A-Za-z0-9]+", text) and any(char.isdigit() for char in text) and any(
+        char.isalpha() for char in text
+    ):
+        six_digit_match = re.search(r"\d{6}", text)
+        if six_digit_match:
+            return six_digit_match.group(0)
+    return text
+
+
 def find_latest_stock_file() -> Path:
     candidates = [
         path
-        for path in Path(".").glob(STOCK_FILE_PATTERN)
+        for path in BASE_DIR.glob(STOCK_FILE_PATTERN)
         if path.is_file() and not path.name.startswith("~$")
     ]
     if not candidates:
@@ -81,17 +119,33 @@ def find_latest_stock_file() -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def resolve_count_data_dir() -> Path:
+    if COUNT_DATA_DIR.exists():
+        return COUNT_DATA_DIR
+
+    matching_dirs = [
+        path
+        for path in BASE_DIR.glob("*")
+        if path.is_dir() and "盘点" in path.name and "数据" in path.name
+    ]
+    if matching_dirs:
+        selected_dir = max(matching_dirs, key=lambda path: path.stat().st_mtime)
+        log(f"未找到默认盘点数据文件夹：{COUNT_DATA_DIR.name}，改用：{selected_dir.name}")
+        return selected_dir
+
+    raise FileNotFoundError(f"未找到盘点数据文件夹：{COUNT_DATA_DIR}")
+
+
 def list_count_files() -> list[Path]:
-    if not COUNT_DATA_DIR.exists():
-        raise FileNotFoundError(f"未找到盘点数据文件夹：{COUNT_DATA_DIR}")
+    count_data_dir = resolve_count_data_dir()
 
     files = sorted(
         path
-        for path in COUNT_DATA_DIR.glob("*.xlsx")
+        for path in count_data_dir.glob("*.xlsx")
         if path.is_file() and not path.name.startswith("~$")
     )
     if not files:
-        raise FileNotFoundError(f"{COUNT_DATA_DIR} 下未找到 .xlsx 文件")
+        raise FileNotFoundError(f"{count_data_dir} 下未找到 .xlsx 文件")
     return files
 
 
@@ -239,6 +293,7 @@ def fill_physical_fields(
     row["实物物料编码"] = material_code
     row["实物数量"] = quantity
     row["实物制造号"] = manufacture_number
+    row["简易制造号2"] = build_simple_manufacture_number(manufacture_number)
     row["状态"] = status
 
 
@@ -258,13 +313,13 @@ def apply_status_to_material_groups(df5: pd.DataFrame) -> pd.DataFrame:
     stock_material_keys = result["物料"].map(clean_text)
     physical_material_keys = result["实物物料编码"].map(clean_text)
     material_keys = stock_material_keys.mask(stock_material_keys == "", physical_material_keys)
-    non_blank_mask = material_keys != ""
 
-    result.loc[non_blank_mask, "状态"] = (
-        result.loc[non_blank_mask]
-        .groupby(material_keys[non_blank_mask], sort=False)["状态"]
-        .transform(get_group_status)
-    )
+    grouped_indexes = result.index.to_series().groupby(material_keys, sort=False)
+    for material_key, indexes in grouped_indexes:
+        if material_key == "":
+            continue
+        group_rows = result.loc[indexes].to_dict("records")
+        result.loc[indexes, "状态"] = determine_df5_group_status(group_rows)
 
     return result
 
@@ -277,6 +332,14 @@ def to_number(value: object) -> float:
     return 0.0 if pd.isna(number) else float(number)
 
 
+def is_nonzero_number(value: object) -> bool:
+    text = clean_text(value).replace(",", "")
+    if not text:
+        return False
+    number = pd.to_numeric(text, errors="coerce")
+    return not pd.isna(number) and float(number) != 0
+
+
 def clean_summary_number(value: float) -> float | int:
     return int(value) if float(value).is_integer() else value
 
@@ -285,8 +348,20 @@ def sum_group_column(rows: list[dict[str, object]], column: str) -> float:
     return sum(to_number(row.get(column, "")) for row in rows)
 
 
+def convert_column_to_number(df: pd.DataFrame, column: str) -> None:
+    if column in df.columns:
+        df[column] = pd.to_numeric(
+            df[column].map(lambda value: clean_text(value).replace(",", "")),
+            errors="coerce",
+        ).fillna(0)
+
+
 def get_stock_rows(group_rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [row for row in group_rows if clean_text(row.get("数据类型", "")) == "库存"]
+    return [row for row in group_rows if clean_text(row.get("数据类型", "")) == "账面"]
+
+
+def get_count_rows(group_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [row for row in group_rows if clean_text(row.get("数据类型", "")) == "盘点"]
 
 
 def calculate_stock_summary_quantity(group_rows: list[dict[str, object]]) -> float:
@@ -295,10 +370,11 @@ def calculate_stock_summary_quantity(group_rows: list[dict[str, object]]) -> flo
     if stock_quantity < 500:
         return stock_quantity
 
+    if any(not is_nonzero_number(row.get("数量(生产单位)", "")) for row in stock_rows):
+        return float(len(stock_rows))
+
     production_quantity = sum_group_column(stock_rows, "数量(生产单位)")
-    if production_quantity != 0:
-        return production_quantity
-    return float(len(stock_rows))
+    return production_quantity
 
 
 def get_group_quantity_summary(group_rows: list[dict[str, object]]) -> tuple[float, float, str]:
@@ -314,6 +390,43 @@ def get_group_quantity_summary(group_rows: list[dict[str, object]]) -> tuple[flo
     return stock_summary_quantity, physical_quantity, consistency
 
 
+def are_all_stock_simple_numbers_in_count_rows(group_rows: list[dict[str, object]]) -> bool:
+    stock_simple_number_values = [
+        clean_text(row.get("简易制造号1", "")) for row in get_stock_rows(group_rows)
+    ]
+    if not stock_simple_number_values or any(not value for value in stock_simple_number_values):
+        return False
+
+    stock_simple_numbers = Counter(stock_simple_number_values)
+    count_simple_numbers = Counter(
+        value
+        for row in get_count_rows(group_rows)
+        if (value := clean_text(row.get("简易制造号2", "")))
+    )
+
+    for simple_number, stock_count in stock_simple_numbers.items():
+        if count_simple_numbers[simple_number] < stock_count:
+            return False
+    return bool(stock_simple_numbers)
+
+
+def determine_df5_group_status(group_rows: list[dict[str, object]]) -> str:
+    stock_rows = get_stock_rows(group_rows)
+    count_rows = get_count_rows(group_rows)
+
+    if not stock_rows and count_rows:
+        return "仅实物"
+    if stock_rows and not count_rows:
+        return "仅账面"
+    if not stock_rows and not count_rows:
+        return "仅账面"
+
+    _, _, consistency = get_group_quantity_summary(group_rows)
+    if consistency == "数量一致" and are_all_stock_simple_numbers_in_count_rows(group_rows):
+        return "账实一致"
+    return "批次号不匹配"
+
+
 def make_df5_summary_row(columns: list[str], group_rows: list[dict[str, object]]) -> dict[str, object]:
     summary_row = make_blank_df5_row(columns)
     summary_row["数据类型"] = "汇总"
@@ -321,7 +434,7 @@ def make_df5_summary_row(columns: list[str], group_rows: list[dict[str, object]]
         (material_key for row in group_rows if (material_key := get_df5_row_material_key(row))),
         "",
     )
-    summary_row["状态"] = get_group_status(pd.Series(row.get("状态", "") for row in group_rows))
+    summary_row["状态"] = determine_df5_group_status(group_rows)
     stock_summary_quantity, physical_quantity, consistency = get_group_quantity_summary(group_rows)
 
     summary_row["非限制使用的库存"] = clean_summary_number(stock_summary_quantity)
@@ -336,28 +449,92 @@ def apply_quantity_consistency_to_group(group_rows: list[dict[str, object]]) -> 
         row["数量一致性"] = consistency
 
 
+def get_manufacture_sort_value(value: object) -> tuple[int, int, int, str]:
+    text = clean_text(value)
+    if not text:
+        return (1, 0, 0, "")
+    if text.isdigit():
+        return (0, 0, int(text), text)
+    return (0, 1, 0, text)
+
+
+def sort_df5_group_rows(group_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    data_type_order = {"账面": 0, "盘点": 1}
+
+    def sort_key(indexed_row: tuple[int, dict[str, object]]) -> tuple[object, ...]:
+        index, row = indexed_row
+        data_type = clean_text(row.get("数据类型", ""))
+        manufacture_column = "简易制造号1" if data_type == "账面" else "简易制造号2"
+        return (
+            data_type_order.get(data_type, 2),
+            get_manufacture_sort_value(row.get(manufacture_column, "")),
+            index,
+        )
+
+    return [row for _, row in sorted(enumerate(group_rows), key=sort_key)]
+
+
+def apply_sync_numbers_to_group(group_rows: list[dict[str, object]]) -> None:
+    stock_rows_by_simple_number: dict[str, list[dict[str, object]]] = {}
+
+    for row in group_rows:
+        row["同步1"] = ""
+        row["同步2"] = ""
+        if clean_text(row.get("数据类型", "")) != "账面":
+            continue
+
+        simple_number = clean_text(row.get("简易制造号1", ""))
+        if simple_number:
+            stock_rows_by_simple_number.setdefault(simple_number, []).append(row)
+
+    sync_number = 1
+    for count_row in group_rows:
+        if clean_text(count_row.get("数据类型", "")) not in {"账面", "盘点"}:
+            continue
+
+        simple_number = clean_text(count_row.get("简易制造号2", ""))
+        if not simple_number:
+            continue
+
+        stock_rows = stock_rows_by_simple_number.get(simple_number, [])
+        if stock_rows:
+            own_stock_index = next(
+                (
+                    index
+                    for index, stock_row in enumerate(stock_rows)
+                    if stock_row is count_row
+                ),
+                None,
+            )
+            stock_row = stock_rows.pop(own_stock_index if own_stock_index is not None else 0)
+            stock_row["同步1"] = sync_number
+            count_row["同步2"] = sync_number
+            sync_number += 1
+        else:
+            count_row["同步2"] = "FF"
+
+    for stock_rows in stock_rows_by_simple_number.values():
+        for stock_row in stock_rows:
+            if not clean_text(stock_row.get("同步1", "")):
+                stock_row["同步1"] = "SS"
+
+
 def append_df5_group_summary_rows(df5: pd.DataFrame) -> pd.DataFrame:
     rows = df5.to_dict("records")
     columns = list(df5.columns)
     output_rows: list[dict[str, object]] = []
-    current_group_rows: list[dict[str, object]] = []
-    current_material_key = ""
+    group_rows_by_material_key: dict[str, list[dict[str, object]]] = {}
 
     for row in rows:
         material_key = get_df5_row_material_key(row)
-        if material_key != current_material_key and current_group_rows:
-            apply_quantity_consistency_to_group(current_group_rows)
-            output_rows.extend(current_group_rows)
-            output_rows.append(make_df5_summary_row(columns, current_group_rows))
-            current_group_rows = []
+        group_rows_by_material_key.setdefault(material_key, []).append(row)
 
-        current_material_key = material_key
-        current_group_rows.append(row)
-
-    if current_group_rows:
-        apply_quantity_consistency_to_group(current_group_rows)
-        output_rows.extend(current_group_rows)
-        output_rows.append(make_df5_summary_row(columns, current_group_rows))
+    for group_rows in group_rows_by_material_key.values():
+        apply_quantity_consistency_to_group(group_rows)
+        sorted_group_rows = sort_df5_group_rows(group_rows)
+        apply_sync_numbers_to_group(sorted_group_rows)
+        output_rows.extend(sorted_group_rows)
+        output_rows.append(make_df5_summary_row(columns, sorted_group_rows))
 
     return pd.DataFrame(output_rows, columns=columns)
 
@@ -398,12 +575,28 @@ def log_df5_summary(df5: pd.DataFrame) -> None:
 
 def build_df5(df2: pd.DataFrame, df4_dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:
     df5 = df2.copy()
-    df5.insert(0, "数据类型", "库存")
-    new_columns = ["图号", "实物物料编码", "实物数量", "实物制造号", "数量一致性", "状态", "S4物料编码"]
+    convert_column_to_number(df5, "数量(生产单位)")
+    df5.insert(0, "数据类型", "账面")
+    batch_insert_at = df5.columns.get_loc("批次") + 1
+    df5.insert(batch_insert_at, "简易制造号1", df5["批次"].map(build_simple_manufacture_number))
+    df5.insert(batch_insert_at + 1, "同步1", "")
+
+    stock_columns = list(df5.columns)
+    new_columns = [
+        "图号",
+        "实物物料编码",
+        "实物数量",
+        "实物制造号",
+        "简易制造号2",
+        "同步2",
+        "数量一致性",
+        "状态",
+        "S4物料编码",
+    ]
     for column in new_columns:
         if column not in df5.columns:
             df5[column] = ""
-    df5 = df5[["数据类型", *df2.columns, *new_columns]]
+    df5 = df5[[*stock_columns, *new_columns]]
 
     rows = df5.to_dict("records")
     columns = list(df5.columns)
@@ -412,10 +605,10 @@ def build_df5(df2: pd.DataFrame, df4_dataframes: dict[str, pd.DataFrame]) -> pd.
 
     for index, row in enumerate(rows):
         material_code = clean_text(row.get("物料", ""))
-        batch_number = clean_text(row.get("批次", ""))
+        simple_number = clean_text(row.get("简易制造号1", ""))
         if not material_code:
             continue
-        exact_indexes_by_key.setdefault((material_code, batch_number), []).append(index)
+        exact_indexes_by_key.setdefault((material_code, simple_number), []).append(index)
         material_indexes_by_code.setdefault(material_code, []).append(index)
 
     insert_rows_after_index: dict[int, list[dict[str, object]]] = {}
@@ -431,18 +624,23 @@ def build_df5(df2: pd.DataFrame, df4_dataframes: dict[str, pd.DataFrame]) -> pd.
 
             quantity = physical_row["实物数量"]
             manufacture_number = clean_text(physical_row["实物制造号"])
+            simple_manufacture_number = build_simple_manufacture_number(manufacture_number)
 
-            exact_indexes = exact_indexes_by_key.get((material_code, manufacture_number), [])
+            exact_indexes = exact_indexes_by_key.get((material_code, simple_manufacture_number), [])
             if exact_indexes:
                 row_index = find_first_empty_status_index(rows, exact_indexes)
+                rows[row_index]["状态"] = "账实一致"
+                new_row = make_blank_df5_row(columns)
+                new_row["数据类型"] = "盘点"
                 fill_physical_fields(
-                    rows[row_index],
+                    new_row,
                     drawing_number,
                     material_code,
                     quantity,
                     manufacture_number,
                     "账实一致",
                 )
+                insert_rows_after_index.setdefault(row_index, []).append(new_row)
                 continue
 
             material_indexes = material_indexes_by_code.get(material_code, [])
@@ -499,15 +697,27 @@ def auto_adjust_column_width(worksheet) -> None:
         worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 45)
 
 
+def get_sync_cell_fill(value: object, only_marker: str, only_color: str) -> PatternFill | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    if text == only_marker:
+        return PatternFill(fill_type="solid", fgColor=only_color)
+    if text.isdigit():
+        color = DF5_SYNC_MATCH_COLORS[(int(text) - 1) % len(DF5_SYNC_MATCH_COLORS)]
+        return PatternFill(fill_type="solid", fgColor=color)
+    return None
+
+
 def format_df5_sheet(worksheet) -> None:
     left_alignment = Alignment(horizontal="left", vertical="center")
-    stock_count_border = Border(top=Side(style="thin", color="000000"))
+    stock_count_border = Border(top=Side(style="dashed", color="000000"))
     summary_border = Border(bottom=Side(style="medium", color="7F9DB9"))
     headers = [clean_text(cell.value) for cell in worksheet[1]]
     header_indexes = {header: index for index, header in enumerate(headers)}
     validate_columns(
         pd.DataFrame(columns=headers),
-        ["数据类型", "物料", "实物物料编码"],
+        ["数据类型", "物料", "实物物料编码", "同步1", "同步2"],
         worksheet.title,
     )
 
@@ -527,6 +737,18 @@ def format_df5_sheet(worksheet) -> None:
         else:
             data_type = clean_text(row[header_indexes["数据类型"]].value)
             material_key = get_df5_material_key(row, header_indexes)
+            sync_cell_fills = {
+                header_indexes["同步1"]: get_sync_cell_fill(
+                    row[header_indexes["同步1"]].value,
+                    "SS",
+                    DF5_SYNC_STOCK_ONLY_COLOR,
+                ),
+                header_indexes["同步2"]: get_sync_cell_fill(
+                    row[header_indexes["同步2"]].value,
+                    "FF",
+                    DF5_SYNC_PHYSICAL_ONLY_COLOR,
+                ),
+            }
             if data_type == "汇总":
                 fill = current_summary_fill
                 add_summary_border = row_number > 1
@@ -544,9 +766,9 @@ def format_df5_sheet(worksheet) -> None:
                 previous_material_key = material_key
                 fill = current_fill
 
-            if data_type in {"库存", "盘点"}:
+            if data_type in {"账面", "盘点"}:
                 add_stock_count_border = (
-                    previous_data_type in {"库存", "盘点"}
+                    previous_data_type in {"账面", "盘点"}
                     and previous_data_type != data_type
                 )
                 previous_data_type = data_type
@@ -555,7 +777,8 @@ def format_df5_sheet(worksheet) -> None:
 
         for cell in row:
             cell.alignment = left_alignment
-            cell.fill = fill
+            cell_fill = sync_cell_fills.get(cell.column - 1) if row_number != 1 else None
+            cell.fill = cell_fill or fill
             if add_summary_border:
                 cell.border = summary_border
             elif add_stock_count_border:
@@ -580,7 +803,7 @@ def safe_sheet_name(name: str, used_names: set[str]) -> str:
 def build_output_path() -> Path:
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d-%H%M%S")
-    return Path(f"M5-3005库位盘点结果-{timestamp}.xlsx")
+    return BASE_DIR / f"M5-3005库位盘点结果-{timestamp}.xlsx"
 
 
 def main() -> None:
