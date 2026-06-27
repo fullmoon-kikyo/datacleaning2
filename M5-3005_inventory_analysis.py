@@ -843,12 +843,6 @@ def main() -> None:
                 sheet_name=safe_sheet_name(table_name, used_sheet_names),
                 index=False,
             )
-        for table_name, df4 in df4_dataframes.items():
-            df4.to_excel(
-                writer,
-                sheet_name=safe_sheet_name(table_name, used_sheet_names),
-                index=False,
-            )
         df4_summary.to_excel(
             writer,
             sheet_name=safe_sheet_name("df4-汇总", used_sheet_names),
