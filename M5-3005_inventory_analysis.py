@@ -169,7 +169,7 @@ def validate_columns(df: pd.DataFrame, required_columns: list[str], table_name: 
 
 
 def build_material_code_from_drawing(value: object) -> str:
-    drawing_number = re.sub(r"[A-Za-z]+$", "", clean_text(value))
+    drawing_number = re.sub(r"[NFX]+$", "", clean_text(value), flags=re.IGNORECASE)
     if not drawing_number:
         return ""
     if drawing_number.upper().startswith("D"):
@@ -330,8 +330,9 @@ def apply_status_to_material_groups(df5: pd.DataFrame) -> pd.DataFrame:
     for material_key, indexes in grouped_indexes:
         if material_key == "":
             continue
-        group_rows = result.loc[indexes].to_dict("records")
-        result.loc[indexes, "状态"] = determine_df5_group_status(group_rows)
+        index_list = indexes.tolist()
+        group_rows = result.loc[index_list].to_dict("records")
+        result.loc[index_list, "状态"] = determine_df5_group_status(group_rows)
 
     return result
 
