@@ -245,15 +245,27 @@ def build_df4(df3: pd.DataFrame, table_name: str) -> pd.DataFrame:
         ]
 
         if manufacture_numbers:
-            rows.extend(
-                {
-                    "图号": drawing_number,
-                    "物料编码": material_code,
-                    "实物数量": 1,
-                    "实物制造号": manufacture_number,
-                }
-                for manufacture_number in manufacture_numbers
-            )
+            actual_quantity_number = pd.to_numeric(pd.Series([actual_quantity]), errors="coerce").iloc[0]
+            manufacture_count = len(manufacture_numbers)
+            for index, manufacture_number in enumerate(manufacture_numbers):
+                row_quantity: object = 1
+                if (
+                    index == manufacture_count - 1
+                    and pd.notna(actual_quantity_number)
+                    and actual_quantity_number != manufacture_count
+                ):
+                    row_quantity = actual_quantity_number - manufacture_count + 1
+                    if isinstance(row_quantity, float) and row_quantity.is_integer():
+                        row_quantity = int(row_quantity)
+
+                rows.append(
+                    {
+                        "图号": drawing_number,
+                        "物料编码": material_code,
+                        "实物数量": row_quantity,
+                        "实物制造号": manufacture_number,
+                    }
+                )
         else:
             rows.append(
                 {
@@ -839,6 +851,12 @@ def main() -> None:
         df2.to_excel(writer, sheet_name=safe_sheet_name("df2-库存抽取", used_sheet_names), index=False)
         for table_name, df3 in df3_dataframes.items():
             df3.to_excel(
+                writer,
+                sheet_name=safe_sheet_name(table_name, used_sheet_names),
+                index=False,
+            )
+        for table_name, df4 in df4_dataframes.items():
+            df4.to_excel(
                 writer,
                 sheet_name=safe_sheet_name(table_name, used_sheet_names),
                 index=False,
